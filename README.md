@@ -16,22 +16,19 @@ E-Waste-Management/
 │   ├── 02_seed.sql
 │   └── 03_report_queries.sql
 ├── EcoCycle_E-Waste_Management_Presentation.pptx # Project presentation slides
-├── run.bat                                  # Master interactive launcher with 8s auto-start
-├── start-mock.bat                           # 1-click quick start for standalone frontend
-├── start-fullstack.bat                      # 1-click full stack launch (Backend + Frontend)
-└── stop-servers.bat                         # 1-click script to stop project servers
+├── run.bat                                  # 1-Click launcher to run the project directly
+└── .gitignore
 ```
 
 ---
 
-## Quick Start with Windows Batch Files
+## Quick Start (Windows)
 
-Double-click any of the following scripts from the repository root:
+Simply double-click **`run.bat`** from the root folder:
 
-- **`run.bat`**: Interactive launcher menu. Automatically launches in Mock Mode if no option is pressed within 8 seconds.
-- **`start-mock.bat`**: Directly starts the frontend in standalone Mock Mode and opens your browser.
-- **`start-fullstack.bat`**: Directly starts both the Express backend and React frontend.
-- **`stop-servers.bat`**: Stops any background servers running on ports `5173` or `5000`.
+- It verifies dependencies and automatically launches the EcoCycle web application.
+- It automatically opens your web browser to **`http://localhost:5173`**.
+- If Oracle XE is running, it connects the backend API; otherwise, it launches in standalone Mock Mode with preloaded demo data so it works immediately with zero configuration.
 
 ---
 
