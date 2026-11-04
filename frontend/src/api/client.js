@@ -3,7 +3,7 @@
 // VITE_USE_MOCK=false -> real Express API (see /backend)
 import { mockRequest } from './mockServer.js';
 
-const USE_MOCK = import.meta.env.VITE_USE_MOCK !== 'false';
+const USE_MOCK = String(import.meta.env.VITE_USE_MOCK ?? 'true').trim().toLowerCase() !== 'false';
 const BASE = import.meta.env.VITE_API_URL || '/api';
 const TOKEN_KEY = 'ecocycle_token';
 
