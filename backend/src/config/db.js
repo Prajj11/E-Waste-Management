@@ -1,50 +1,35 @@
 import 'dotenv/config';
-import oracledb from 'oracledb';
+import mongoose from 'mongoose';
 
-oracledb.outFormat = oracledb.OUT_FORMAT_OBJECT;
-oracledb.fetchAsString = [oracledb.CLOB];
-
-let pool;
-
-export async function initDb() {
-  pool = await oracledb.createPool({
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    connectString: process.env.DB_CONNECT_STRING,
-    poolMin: 1,
-    poolMax: 8,
-  });
-  console.log('Oracle pool ready');
-}
-
-export const closeDb = () => pool?.close(5);
-
-/** Run one statement. SELECTs return rows; DML auto-commits. */
-export async function query(sql, binds = {}, opts = {}) {
-  const conn = await pool.getConnection();
+/**
+ * Initializes MongoDB connection using Mongoose.
+ * Reads MONGODB_URI from environment variables.
+ */
+export async function initDb(options = {}) {
+  const uri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/ecocycle';
   try {
-    const res = await conn.execute(sql, binds, { autoCommit: true, ...opts });
-    return res;
-  } finally {
-    await conn.close();
-  }
-}
-export const rows = async (sql, binds, opts) => (await query(sql, binds, opts)).rows ?? [];
-
-/** Run several statements atomically: await tx(async (run) => { await run(sql1); await run(sql2); }) */
-export async function tx(work) {
-  const conn = await pool.getConnection();
-  try {
-    const run = (sql, binds = {}, opts = {}) => conn.execute(sql, binds, { autoCommit: false, ...opts });
-    const out = await work(run);
-    await conn.commit();
-    return out;
+    const conn = await mongoose.connect(uri, {
+      serverSelectionTimeoutMS: 3000,
+      ...options,
+    });
+    console.log(`MongoDB connected: ${conn.connection.host || 'cluster'}/${conn.connection.name}`);
+    return conn;
   } catch (err) {
-    await conn.rollback();
+    console.error(`MongoDB connection error: ${err.message}`);
     throw err;
-  } finally {
-    await conn.close();
   }
 }
 
-export { oracledb };
+/**
+ * Closes the MongoDB connection gracefully.
+ */
+export async function closeDb() {
+  try {
+    await mongoose.disconnect();
+    console.log('MongoDB connection closed');
+  } catch (err) {
+    console.error(`Error closing MongoDB connection: ${err.message}`);
+  }
+}
+
+export { mongoose };
