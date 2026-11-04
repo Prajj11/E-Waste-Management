@@ -1,82 +1,133 @@
-import { rows, tx, oracledb } from '../config/db.js';
+import { Request, Category, User } from '../models/index.js';
 import { HttpError } from '../middleware/errors.js';
 
-const SELECT = `
-  SELECT request_id "id", user_id "userId", user_name "userName", category_id "categoryId", category_name "categoryName",
-         item_name "itemName", quantity "quantity", item_condition "condition", pickup_address "pickupAddress",
-         TO_CHAR(preferred_date,'YYYY-MM-DD') "preferredDate", status "status", collector_id "collectorId",
-         collector_name "collectorName", TO_CHAR(scheduled_date,'YYYY-MM-DD') "scheduledDate",
-         TO_CHAR(collected_on,'YYYY-MM-DD') "collectedOn", remarks "remarks",
-         TO_CHAR(created_at,'YYYY-MM-DD"T"HH24:MI:SS') "createdAt"
-  FROM v_request_details`;
+const POPULATE_OPTS = [
+  { path: 'userId', select: 'fullName email phone' },
+  { path: 'categoryId', select: 'name hazardLevel' },
+  { path: 'collectorId', select: 'fullName phone vehicleNo area' },
+];
 
-const withHistory = async (list) => {
-  if (!list.length) return list;
-  const hist = await rows(
-    `SELECT request_id "requestId", status "status", TO_CHAR(changed_at,'YYYY-MM-DD"T"HH24:MI:SS') "at"
-     FROM status_history ORDER BY history_id`
-  );
-  return list.map((r) => ({ ...r, history: hist.filter((h) => h.requestId === r.id).map(({ status, at }) => ({ status, at })) }));
+const NEXT_STATUS = {
+  Pending: ['Assigned'],
+  Assigned: ['Collected'],
+  Collected: ['Processing'],
+  Processing: ['Recycled', 'Disposed'],
 };
-
-export const getOne = async (id) => (await withHistory(await rows(`${SELECT} WHERE request_id = :id`, { id })))[0];
 
 export async function list(req, res) {
   const { id, role } = req.user;
-  let where = '', binds = {};
-  if (role === 'USER') { where = 'WHERE user_id = :uid'; binds = { uid: id }; }
-  if (role === 'COLLECTOR') { where = 'WHERE collector_id = (SELECT collector_id FROM collector WHERE user_id = :uid)'; binds = { uid: id }; }
-  res.json(await withHistory(await rows(`${SELECT} ${where} ORDER BY created_at DESC`, binds)));
+  const filter = {};
+
+  if (role === 'USER') {
+    filter.userId = id;
+  } else if (role === 'COLLECTOR') {
+    filter.collectorId = id;
+  }
+  // ADMIN receives all requests without filter
+
+  const requests = await Request.find(filter)
+    .populate(POPULATE_OPTS)
+    .sort({ createdAt: -1 });
+
+  res.json(requests.map((r) => r.toJSON()));
 }
 
 export async function create(req, res) {
   const { categoryId, itemName, quantity, condition, pickupAddress, preferredDate } = req.body;
-  if (!categoryId || !itemName || !condition || !pickupAddress || !preferredDate) throw new HttpError(400, 'Please fill in all required fields');
-  const newId = await tx(async (run) => {
-    const r = await run(
-      `INSERT INTO collection_request (user_id, category_id, item_name, quantity, item_condition, pickup_address, preferred_date)
-       VALUES (:uid, :categoryId, :itemName, :quantity, :condition, :pickupAddress, TO_DATE(:preferredDate,'YYYY-MM-DD'))
-       RETURNING request_id INTO :id`,
-      { uid: req.user.id, categoryId: Number(categoryId), itemName, quantity: Number(quantity) || 1, condition, pickupAddress, preferredDate,
-        id: { type: oracledb.NUMBER, dir: oracledb.BIND_OUT } }
-    );
-    return r.outBinds.id[0];
+
+  if (!categoryId || !itemName || !condition || !pickupAddress || !preferredDate) {
+    throw new HttpError(400, 'Please fill in all required fields');
+  }
+
+  const categoryExists = await Category.findById(categoryId);
+  if (!categoryExists) {
+    throw new HttpError(404, 'Selected category does not exist');
+  }
+
+  const newRequest = await Request.create({
+    userId: req.user.id,
+    categoryId,
+    itemName: itemName.trim(),
+    quantity: Number(quantity) || 1,
+    condition,
+    pickupAddress: pickupAddress.trim(),
+    preferredDate,
+    status: 'Pending',
+    history: [{ status: 'Pending', at: new Date() }],
   });
-  res.status(201).json(await getOne(newId));
+
+  const populated = await Request.findById(newRequest._id).populate(POPULATE_OPTS);
+  res.status(201).json(populated.toJSON());
 }
 
 export async function assign(req, res) {
+  const { id } = req.params;
   const { collectorId, scheduledDate } = req.body;
-  if (!collectorId || !scheduledDate) throw new HttpError(400, 'Collector and scheduled date are required');
-  const id = Number(req.params.id);
-  const [cur] = await rows('SELECT status "status" FROM collection_request WHERE request_id = :id', { id });
-  if (!cur) throw new HttpError(404, 'Request not found');
-  if (!['Pending', 'Assigned'].includes(cur.status)) throw new HttpError(400, 'Only pending or assigned requests can be (re)assigned');
-  await tx((run) => run(
-    `UPDATE collection_request SET collector_id = :collectorId, scheduled_date = TO_DATE(:scheduledDate,'YYYY-MM-DD'), status = 'Assigned'
-     WHERE request_id = :id`, { collectorId: Number(collectorId), scheduledDate, id }));
-  res.json(await getOne(id));
+
+  if (!collectorId || !scheduledDate) {
+    throw new HttpError(400, 'Collector and scheduled date are required');
+  }
+
+  const collector = await User.findOne({ _id: collectorId, role: 'COLLECTOR' });
+  if (!collector) {
+    throw new HttpError(404, 'Collector not found');
+  }
+
+  const request = await Request.findById(id);
+  if (!request) {
+    throw new HttpError(404, 'Request not found');
+  }
+
+  if (!['Pending', 'Assigned'].includes(request.status)) {
+    throw new HttpError(400, 'Only pending or assigned requests can be (re)assigned');
+  }
+
+  request.collectorId = collector._id;
+  request.scheduledDate = scheduledDate;
+  request.status = 'Assigned';
+  request.history.push({ status: 'Assigned', at: new Date() });
+
+  await request.save();
+
+  const populated = await Request.findById(request._id).populate(POPULATE_OPTS);
+  res.json(populated.toJSON());
 }
 
-// allowed next statuses, enforced on the server
-const NEXT = { Pending: ['Assigned'], Assigned: ['Collected'], Collected: ['Processing'], Processing: ['Recycled', 'Disposed'] };
-
 export async function setStatus(req, res) {
-  const id = Number(req.params.id);
+  const { id } = req.params;
   const { status, remarks } = req.body;
-  const [cur] = await rows('SELECT status "status", collector_id "collectorId" FROM collection_request WHERE request_id = :id', { id });
-  if (!cur) throw new HttpError(404, 'Request not found');
-  if (!(NEXT[cur.status] || []).includes(status)) throw new HttpError(400, `Cannot move a ${cur.status} request to ${status}`);
+
+  const request = await Request.findById(id);
+  if (!request) {
+    throw new HttpError(404, 'Request not found');
+  }
+
+  const allowedNext = NEXT_STATUS[request.status] || [];
+  if (!allowedNext.includes(status)) {
+    throw new HttpError(400, `Cannot move a ${request.status} request to ${status}`);
+  }
 
   if (req.user.role === 'COLLECTOR') {
-    const [mine] = await rows('SELECT collector_id "id" FROM collector WHERE user_id = :uid', { uid: req.user.id });
-    if (!mine || mine.id !== cur.collectorId) throw new HttpError(403, 'This pickup is not assigned to you');
-    if (status !== 'Collected') throw new HttpError(403, 'Collectors can only mark items as collected');
+    const collectorIdStr = request.collectorId ? request.collectorId.toString() : null;
+    if (collectorIdStr !== req.user.id) {
+      throw new HttpError(403, 'This pickup is not assigned to you');
+    }
+    if (status !== 'Collected') {
+      throw new HttpError(403, 'Collectors can only mark items as collected');
+    }
   }
-  await tx((run) => run(
-    `UPDATE collection_request
-        SET status = :status, remarks = NVL(:remarks, remarks),
-            collected_on = CASE WHEN :status = 'Collected' THEN TRUNC(SYSDATE) ELSE collected_on END
-      WHERE request_id = :id`, { status, remarks: remarks ?? null, id }));
-  res.json(await getOne(id));
+
+  request.status = status;
+  if (remarks !== undefined && remarks !== null) {
+    request.remarks = remarks.trim();
+  }
+  if (status === 'Collected') {
+    request.collectedOn = new Date().toISOString().slice(0, 10);
+  }
+
+  request.history.push({ status, at: new Date() });
+  await request.save();
+
+  const populated = await Request.findById(request._id).populate(POPULATE_OPTS);
+  res.json(populated.toJSON());
 }

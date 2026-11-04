@@ -1,69 +1,161 @@
-import { rows, query, oracledb } from '../config/db.js';
+import { Category, Facility, User, Request, ProcessingRecord } from '../models/index.js';
 import { HttpError } from '../middleware/errors.js';
 
-// ---- categories -----------------------------------------------------------------------------
-const CAT = `SELECT category_id "id", name "name", description "description", hazard_level "hazardLevel" FROM ewaste_category`;
-export const listCategories = async (req, res) => res.json(await rows(`${CAT} ORDER BY name`));
+// ============================================================================
+// Categories
+// ============================================================================
+
+export async function listCategories(req, res) {
+  const categories = await Category.find().sort({ name: 1 });
+  res.json(categories.map((c) => c.toJSON()));
+}
 
 export async function addCategory(req, res) {
   const { name, description, hazardLevel } = req.body;
-  if (!name) throw new HttpError(400, 'Category name is required');
-  const r = await query(
-    `INSERT INTO ewaste_category (name, description, hazard_level) VALUES (:name, :description, :hazard) RETURNING category_id INTO :id`,
-    { name, description: description || null, hazard: hazardLevel || 'Low', id: { type: oracledb.NUMBER, dir: oracledb.BIND_OUT } });
-  res.status(201).json((await rows(`${CAT} WHERE category_id = :id`, { id: r.outBinds.id[0] }))[0]);
+  if (!name || !name.trim()) {
+    throw new HttpError(400, 'Category name is required');
+  }
+
+  const existing = await Category.findOne({ name: name.trim() });
+  if (existing) {
+    throw new HttpError(409, 'Category already exists');
+  }
+
+  const category = await Category.create({
+    name: name.trim(),
+    description: description ? description.trim() : null,
+    hazardLevel: hazardLevel || 'Low',
+  });
+
+  res.status(201).json(category.toJSON());
 }
+
 export async function updateCategory(req, res) {
+  const { id } = req.params;
   const { name, description, hazardLevel } = req.body;
-  const id = Number(req.params.id);
-  const r = await query(`UPDATE ewaste_category SET name = :name, description = :description, hazard_level = :hazard WHERE category_id = :id`,
-    { name, description: description || null, hazard: hazardLevel || 'Low', id });
-  if (!r.rowsAffected) throw new HttpError(404, 'Category not found');
-  res.json((await rows(`${CAT} WHERE category_id = :id`, { id }))[0]);
+
+  const category = await Category.findById(id);
+  if (!category) {
+    throw new HttpError(404, 'Category not found');
+  }
+
+  if (name) category.name = name.trim();
+  if (description !== undefined) category.description = description ? description.trim() : null;
+  if (hazardLevel) category.hazardLevel = hazardLevel;
+
+  await category.save();
+  res.json(category.toJSON());
 }
+
 export async function deleteCategory(req, res) {
-  const [used] = await rows('SELECT COUNT(*) "n" FROM collection_request WHERE category_id = :id', { id: Number(req.params.id) });
-  if (used.n > 0) throw new HttpError(409, 'Category is used by existing requests');
-  await query('DELETE FROM ewaste_category WHERE category_id = :id', { id: Number(req.params.id) });
+  const { id } = req.params;
+  const inUse = await Request.countDocuments({ categoryId: id });
+  if (inUse > 0) {
+    throw new HttpError(409, 'Category is used by existing requests');
+  }
+
+  const result = await Category.findByIdAndDelete(id);
+  if (!result) {
+    throw new HttpError(404, 'Category not found');
+  }
+
   res.json({ deleted: true });
 }
 
-// ---- facilities -----------------------------------------------------------------------------
-const FAC = `SELECT facility_id "id", name "name", location "location", capacity_kg "capacityKg", certification "certification" FROM recycling_facility`;
-export const listFacilities = async (req, res) => res.json(await rows(`${FAC} ORDER BY name`));
+// ============================================================================
+// Recycling Facilities
+// ============================================================================
+
+export async function listFacilities(req, res) {
+  const facilities = await Facility.find().sort({ name: 1 });
+  res.json(facilities.map((f) => f.toJSON()));
+}
+
 export async function addFacility(req, res) {
   const { name, location, capacityKg, certification } = req.body;
-  if (!name || !location || !capacityKg) throw new HttpError(400, 'Name, location and capacity are required');
-  const r = await query(
-    `INSERT INTO recycling_facility (name, location, capacity_kg, certification) VALUES (:name, :location, :cap, :cert) RETURNING facility_id INTO :id`,
-    { name, location, cap: Number(capacityKg), cert: certification || null, id: { type: oracledb.NUMBER, dir: oracledb.BIND_OUT } });
-  res.status(201).json((await rows(`${FAC} WHERE facility_id = :id`, { id: r.outBinds.id[0] }))[0]);
+  if (!name || !location || !capacityKg) {
+    throw new HttpError(400, 'Name, location and capacity are required');
+  }
+
+  const facility = await Facility.create({
+    name: name.trim(),
+    location: location.trim(),
+    capacityKg: Number(capacityKg),
+    certification: certification ? certification.trim() : null,
+  });
+
+  res.status(201).json(facility.toJSON());
 }
+
 export async function deleteFacility(req, res) {
-  const id = Number(req.params.id);
-  const [used] = await rows('SELECT COUNT(*) "n" FROM processing_record WHERE facility_id = :id', { id });
-  if (used.n > 0) throw new HttpError(409, 'Facility has processing records');
-  await query('DELETE FROM recycling_facility WHERE facility_id = :id', { id });
+  const { id } = req.params;
+  const inUse = await ProcessingRecord.countDocuments({ facilityId: id });
+  if (inUse > 0) {
+    throw new HttpError(409, 'Facility has processing records');
+  }
+
+  const result = await Facility.findByIdAndDelete(id);
+  if (!result) {
+    throw new HttpError(404, 'Facility not found');
+  }
+
   res.json({ deleted: true });
 }
 
-// ---- users & collectors ---------------------------------------------------------------------
-export const listUsers = async (req, res) => res.json(await rows(
-  `SELECT user_id "id", full_name "fullName", email "email", phone "phone", role "role", address "address",
-          TO_CHAR(created_at,'YYYY-MM-DD"T"HH24:MI:SS') "createdAt" FROM app_user ORDER BY user_id`));
+// ============================================================================
+// Users & Collectors
+// ============================================================================
+
+export async function listUsers(req, res) {
+  const users = await User.find().sort({ createdAt: -1 });
+  res.json(users.map((u) => u.toJSON()));
+}
 
 export async function deleteUser(req, res) {
-  const id = Number(req.params.id);
-  if (id === req.user.id) throw new HttpError(400, 'You cannot delete your own account');
-  const [used] = await rows('SELECT COUNT(*) "n" FROM collection_request WHERE user_id = :id', { id });
-  if (used.n > 0) throw new HttpError(409, 'This user has e-waste requests and cannot be deleted');
-  await query('DELETE FROM app_user WHERE user_id = :id', { id });
+  const { id } = req.params;
+  if (id === req.user.id) {
+    throw new HttpError(400, 'You cannot delete your own account');
+  }
+
+  const hasRequests = await Request.countDocuments({ userId: id });
+  if (hasRequests > 0) {
+    throw new HttpError(409, 'This user has e-waste requests and cannot be deleted');
+  }
+
+  const hasAssignedPickups = await Request.countDocuments({ collectorId: id });
+  if (hasAssignedPickups > 0) {
+    throw new HttpError(409, 'This collector has assigned requests and cannot be deleted');
+  }
+
+  const result = await User.findByIdAndDelete(id);
+  if (!result) {
+    throw new HttpError(404, 'User not found');
+  }
+
   res.json({ deleted: true });
 }
 
-export const listCollectors = async (req, res) => res.json(await rows(
-  `SELECT co.collector_id "id", co.user_id "userId", u.full_name "fullName", co.vehicle_no "vehicleNo", co.area "area",
-          co.available "available",
-          (SELECT COUNT(*) FROM collection_request r WHERE r.collector_id = co.collector_id AND r.status IN ('Assigned','Collected')) "activeJobs"
-   FROM collector co JOIN app_user u ON u.user_id = co.user_id ORDER BY u.full_name`)
-  .then((list) => list.map((c) => ({ ...c, available: c.available === 1 }))));
+export async function listCollectors(req, res) {
+  const collectors = await User.find({ role: 'COLLECTOR' }).sort({ fullName: 1 });
+
+  const results = await Promise.all(
+    collectors.map(async (c) => {
+      const activeJobs = await Request.countDocuments({
+        collectorId: c._id,
+        status: { $in: ['Assigned', 'Collected'] },
+      });
+
+      return {
+        id: c.id,
+        userId: c.id,
+        fullName: c.fullName,
+        vehicleNo: c.vehicleNo || '—',
+        area: c.area || '—',
+        available: c.available !== false,
+        activeJobs,
+      };
+    })
+  );
+
+  res.json(results);
+}
